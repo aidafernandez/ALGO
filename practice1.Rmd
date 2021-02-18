@@ -1,0 +1,370 @@
+---
+title: "Blog Practice in R"
+output: html_document
+---
+
+This is a joint work with Aleix Ruiz, Jesús Cerquides, Joan Capdevila and Borja Velasco within the Barcelona Autonomous [Learning Group - BCN Algo](https://www.notion.so/aleixrvr/Causality-ALGO-0f8f6241ba5f44fda764f6806df4f3cb). You can find a theory post explaining the same topics [here](https://www.notion.so/Blog-Theory-4d9870a3dd944a47a04222eb4fce871e)
+
+A common data problem to be solved in any field involves solving if a treatment has any effect on a certain outcome. Now, this at first glance doesn't seem to be that difficult. But for anyone that has fallen in the rabbit hole that is the study of causal effects, it will be evident that it is not the case. It is not the same computing these effects from Randomized Control Trial (RCT) databases that doing it from observational datasets. As it is also not the same researching problems with low or high dimensional covariates.
+
+This entry can be of interest to anyone that has been mildly introduced to Causal Inference and wants to see it at work with a code example, where we will review some relatively simple ways to compute the Average Treatment Effect (ATE) from observational datasets.
+
+Now, let's make this journey with a hands-on example. You can find the original notebooks and dataset in github by [\@cerquide](https://github.com/cerquide/propensity_score_talk).
+
+We are given this database coming from the historical records of a hospital:
+
+```{r}
+df <- read.table("sample.txt",header = T,sep=",")
+
+rbind(head(df,5),tail(df,5))
+```
+
+And we are asked:
+
+How much will the number of deaths change if we decide to treat everybody from now on versus not treating anyone?
+
+Our first instinct is to simply compute the percentages of deaths of the treated population versus the untreated population using the data we are given, and simply subtract one from the other
+
+```{r}
+#df$smoker <- factor(df$smoker)
+df$treatment <- factor(df$treatment,labels=c("untreated","treated"))
+#df$dead <- factor(df$dead)
+```
+
+```{r}
+(percentage_dead_treated = mean(df$dead[df$treatment=="treated"]))
+
+(percentage_dead_untreated = mean(df$dead[df$treatment=="untreated"]))
+
+percentage_dead_treated-percentage_dead_untreated
+```
+
+This calculation leads us to the following answer: The percentage of deaths will increase an `r sprintf("%.2f",(percentage_dead_treated-percentage_dead_untreated)*100)` if we decide to treat everybody (it will jump from `r sprintf("%.2f%%",percentage_dead_untreated*100)` to `r sprintf("%.2f%%",percentage_dead_treated*100)`).
+
+This result would then counsel us that we should not treat our population, but our common sense may be "tingling" and making us wonder if that is really the case. And rightly so, because we overlooked a tiny but very crucial detail, and that is that the treatment is not distributed equally between the smoking population and the non-smoking one. In other words, treatment is not randomized, and hence, this way of calculating the ATE is simply wrong.
+
+Another way of defining this phenomenon is with the word "confounding". Basically, what this word means is that there is a variable or a group of them (the confounders) that affect in some way the probability of getting the treatment and at the same time, affect also the outcome.
+
+Ideally, if we want to estimate the effect of some treatment on whatever we could consider an outcome, we should avoid any kind of confounding effect. We can do that by designing an RCT where treatment is allocated randomly and hence the confounders have no effect on how it is distributed. But the issue here is that it is not always ethical to do so. Consider, for example, that we wanted to estimate the effect of smoking (“treatment”) in lung health (outcome) of asthmatic teenagers. To do an RCT study, we should take a number of teenagers and randomly assign half of them to forcibly smoke. Obviously, this is not ethical and should never be done. We could, however, retrieve data of asthmatic teenagers and record if they smoke or not, what is their lung health grade, and especially, any variable that can be affecting the chances of smoking of any teenager. A clear possible confounder in this example would be socioeconomic status, as a low status can increase the chances of an unstable familiar ambient and more exposition to bad habits (affecting “treatment”), and it can certainly affect the lung health (outcome) of the teenager via less access to a good health plan. This is what we would call an observational dataset, where we know a set of confounders are in play. Expert knowledge on the issue is key to try to include all possible confounders so we can estimate better the effect of treatment on outcome using Causal Inference techniques.
+
+As stated at the beginning, in this entry we will introduce some simple ways of doing so using the Adjustment Formula by Pearl first; and then the Propensity Score, applying 2 methods introduced by Rosenbaum and Rubin in their famous paper of 1983.
+
+## Adjustment Formula
+If you have read or perused the book “Causal Inference in Statistics: A primer” by Judea Pearl you certainly know and love the Adjustment Formula (if you didn’t and you are interested in this field, go now and read it!). Maybe you came to know it in another way. Just in case you still didn’t make your acquaintance with it, let me present it to you:
+
+$$P(Y|do(X)) = \sum_z P(Y|X,Z)P(Z)$$
+
+Where Y is the outcome, X the treatment and Z the set of covariates or confounders. Now, I am not going to enter in how this formula came to be or its more formal details, as this is not the aim of this text. It is sufficient with knowing that the expression P(Y|do(X)) refers to the probability of Y (outcome) if we do X (treatment) for all the population. Following this definition, we could calculate the ATE in the following way:
+
+$$ATE = P(Y|do(X=1))-P(Y|do(X=0))$$
+
+So, with this clarified, let's return to our original example. This dataset that we presented is, actually, fabricated. Using Bayesian Nets, we specified the dependencies between our 3 variables (Smoker, Treatment, Dead) and generated a dataset.
+
+```{r}
+df$smoker <- factor(df$smoker)
+df$dead <- factor(df$dead)
+```
+
+```{r out.width="60%"}
+#install.packages("bnlearn")
+library(bnlearn)
+res <- hc(df)
+
+plot(res)
+```
+
+```{r}
+df <- read.table("sample.txt",header = T,sep=",")
+```
+
+
+```{r}
+#install.packages("plotrix")
+library(plotrix)
+
+colortable <- function(t){
+  m <- as.matrix(t)
+  color2D.matplot(m, 
+                show.values = TRUE,
+                axes = FALSE,
+                xlab = "",
+                ylab = "",
+                vcex = 2,
+                vcol = "black",
+                extremes = c("white", "blue"))
+  axis(3, at = seq_len(ncol(m)) - 0.5,
+     labels = colnames(m), tick = FALSE, cex.axis = 2)
+  axis(2, at = seq_len(nrow(m)) -0.5,
+     labels = rev(rownames(m)), tick = FALSE, las = 1, cex.axis = 2)
+}
+```
+
+
+```{r out.width="40%"}
+bn.cpt.smoker <- array(c(0.7,0.3),c(1,2))
+colnames(bn.cpt.smoker) <- c(0,1)
+
+bn.cpt.treatment <- array(c(0.8,0.45,0.2,0.55),c(2,2))
+dimnames(bn.cpt.treatment) <- list(c(0,1),c(0,1))
+
+bn.cpt.dead <- array(c(0.9,0.2,0.1,0.8,0.89,0.5,0.11,0.5),c(2,2,2))
+dimnames(bn.cpt.dead) <- list(c(0,1),c(0,1),c(0,1))
+
+bn.cpt <- list(bn.cpt.smoker,bn.cpt.treatment,bn.cpt.dead)
+names(bn.cpt) <- c("smoker","treatment","dead")
+
+print(bn.cpt)
+```
+
+----------------------------
+
+This tables estimated using the sample would be:
+
+```{r out.width="40%"}
+(t_s <- prop.table(table(df$smoker)))
+
+t_st <- prop.table(table(df$smoker,df$treatment),1)
+
+t_tsd <- prop.table(ftable(df$treatment,df$smoker,df$dead),1)
+
+colortable(t_st)
+colortable(t_tsd)
+```
+
+
+----------------------------
+
+
+Since we know exactly all the true probabilities of each variable and all its possible combinations, we can apply the formula to compute the exact probability of dying if we treat everybody versus the probability of dying if we don't treat anybody.
+
+$$
+\begin{split}
+p(dead=1|do(treatment=1)) = & p(smoker=0)p(dead=1|treatment=1,smoker=0) +\\  & p(smoker=1)p(dead=1|treatment=1,smoker=1)
+\end{split}
+$$
+
+```{r}
+(expected_dead_in_treated = as.numeric(
+   bn.cpt$smoker[,"0"]*bn.cpt$dead["0","1","1"]+
+   bn.cpt$smoker[,"1"]*bn.cpt$dead["1","1","1"]))
+```
+
+$$
+\begin{split}
+p(dead=1|do(treatment=0)) = & p(smoker=0)p(dead=1|treatment=0,smoker=0) +\\  & p(smoker=1)p(dead=1|treatment=0,smoker=1)
+\end{split}
+$$
+```{r}
+(expected_dead_in_untreated = as.numeric(
+   bn.cpt$smoker[,"0"]*bn.cpt$dead["0","1","0"]+
+   bn.cpt$smoker[,"1"]*bn.cpt$dead["1","1","0"]))
+```
+
+Now, with these two results, we can calculate the Average Treatment Effect (ATE).
+
+```{r}
+(ATE <- expected_dead_in_treated - expected_dead_in_untreated)
+```
+
+The real effect of this treatment then, is a lowered percentage of deaths by an wing answer: The percentage of deaths will increase an `r sprintf("%.1f%%",(-ATE)*100)`, exactly the contrary that we got in the first calculations. Then, the real answer is that we should absolutely treat all patients. Now, to have this exact percentages is very rare. We can certainly approximate ATE with a good observational dataset, applying the same system, but the problem with this method arises when the dataset has a high dimensional set of covariates. Imagine a set of covariates in the hundreds. Computing this formula for all the covariates would be too cumbersome. It is not the case of this very simple example, but in the real world it is a very common circumstance. What should we do in those cases then?
+
+
+## Propensity of treatment as a balancing score
+
+Well, that is something that Rosenbaum and Rubin tried to solve in 1983 proposing that we use the propensity score (or probability of getting a treatment given a set of covariates) as a balancing score. Their reasoning goes as follows. A balancing score is any function of the set of covariates that captures all the information of the set that is dependent on treatment. Such a balancing score would allow us model the relation between the confounders and treatment in a relatively simple way. And the minimal expression of a balancing score is the propensity score.
+
+Computing the propensity score is relatively simple, even in high dimensional sets of covariates. In these cases what we could do is model it using logistic regression with treatment as the target variable. But to be able to use this propensity score in the methods we will review next, there are some constraints.
+
+A common theme that we are going to find in Causal Inference is the unconfoundness condition. What this means, basically, is that to be able to make a reasonable approximation of the ATE value using observational databases, it is imperative that we account for all possible variables that could act as confounders.
+
+To ensure this, formally, there are 2 assumptions that need to be met:
+
+  - The stable unit-treatment value assumption (SUTVA): Any outcome of any unit of the sample is independent of the treatment assignment to other units.
+  
+  - Treatment assignment should be strongly ignorable given a set of covariates: It is if every unit of the sample has a chance (even if small) of receiving each treatment, and if the treatment assignment and outcome are conditionally independent given that set of covariates.
+  
+If these two assumptions are met, we are good to go with the methods we are going to review now.
+
+Without further ado, let’s take a look at them.
+
+
+## Propensity Score Pair Matching
+
+As before, we will review the methods applying them to our specific example. As stated earlier, we were able to compute the exact ATE because we knew the accurate probabilities of every variable combination. These methods assume that we don’t know them, because with high dimensional sets of covariates that would be nearly impossible. Therefore, we will compare their estimations of the value of ATE to the known true result.
+
+Let’s start by computing our propensity score values. It is defined formally as follows:
+
+$$e(x) = P(z=1|x)$$
+
+Where x is a specific combination of the set of covariates and z = 1 equates to receiving treatment.
+
+And in our specific case it is translated to:
+
+$$e(smoker)=P(treatment=1|smoker)$$
+Now we compute the propensity of each patient:
+
+```{r}
+n_smokers <- sum(df$smoker==1)
+n_treated_smokers <- nrow(subset(df,smoker==1 & treatment==1))
+e_smoker <- n_treated_smokers/n_smokers
+print(e_smoker)
+```
+
+```{r}
+n_non_smokers <- sum(df$smoker==0)
+n_treated_non_smokers <- nrow(subset(df,smoker==0 & treatment==1))
+e_non_smoker <- n_treated_non_smokers/n_non_smokers
+print(e_non_smoker)
+```
+
+```{r}
+df$propensity <- df$smoker*e_smoker + (1-df$smoker)*e_non_smoker
+
+rbind(head(df,5),tail(df,5))
+```
+
+In this case there are only 2 possible values, since our confounder is binary. Once computed and added to our dataframe we can pair match in two different ways.
+
+
+### Pair match v1
+
+In this version of pair matching, we couple each treated patient with a control patient that has the same propensity score. For this example, we reduce the number of treated patients for efficiency reasons.
+
+```{r}
+treated <- subset(df,treatment==1)
+treated <- treated[sample(1:nrow(treated),100),]
+rownames(treated) <- c(1:nrow(treated))
+
+rbind(head(treated,5),tail(treated,5))
+```
+
+Now, every treated patient gets a randomly sampled untreated patient with the same propensity score:
+
+```{r}
+untreated <- subset(df,treatment==0)
+```
+
+```{r}
+add_matched_control <- function(patient){
+  p <- patient[4]
+  sub <- subset(untreated,propensity==p)
+  j <- sample(rownames(sub),1)
+  return(j)
+}
+
+j <- apply(treated,1,add_matched_control)
+matched_control_df <- untreated[j,]
+colnames(matched_control_df) <- paste0(colnames(matched_control_df),"_control")
+rownames(matched_control_df) <- c(1:nrow(matched_control_df))
+```
+
+Now that we have matched pairs, we can join both dataframes and simply compute the mean difference between treated and untreated outcomes:
+
+```{r}
+paired_sample <- cbind(treated,matched_control_df)
+rbind(head(paired_sample,5),tail(paired_sample,5))
+```
+
+
+```{r}
+ATE <- mean(paired_sample$dead-paired_sample$dead_control)
+ATE
+```
+
+We get as a result that the percentage of deaths is effectively estimated to decrease, which is good as it is in line with the real effect computed before. However, we know that the real ATE is 0.083. This result is clearly biased.
+
+Let's take a look at the second version of pair matching.
+
+
+
+### Pair Matchin v2
+
+We start by taking a look at the distribution of our propensity score:
+
+```{r}
+hist(df$propensity,main="Propensity",col="SkyBlue",xlab = "propensity")
+```
+
+Clearly, we have a majority of the patients getting a low propensity score.
+
+We can split patients into two groups, those with high propensity ($>$ 0.5) and those with low propensity ($\leq$0.5):
+
+```{r}
+high_propensity <- subset(df,propensity>0.5)
+low_propensity <- subset(df,propensity<=0.5)
+
+counts <- c(nrow(low_propensity),nrow(high_propensity))
+percentages <- counts / sum(counts)
+percentages
+```
+
+And now we build a paired sample, but unlike before both treated and untreated populations are sampled from high or low propensity score population at random.
+
+```{r}
+n_samples = 1000
+
+high_prop_treat <- subset(high_propensity,treatment==1)
+high_prop_untreat <- subset(high_propensity,treatment==0)
+low_prop_treat <- subset(low_propensity,treatment==1)
+low_prop_untreat <- subset(low_propensity,treatment==0)
+
+ind_t <- numeric(n_samples)
+ind_unt <- numeric(n_samples)
+
+for (i in 1:n_samples){
+  if (runif(1)>percentages[1]){
+    ind_t[i] <- sample(rownames(high_prop_treat),1)
+    ind_unt[i] <- sample(rownames(high_prop_untreat),1)
+  }
+  
+  else {
+    ind_t[i] <- sample(rownames(low_prop_treat),1)
+    ind_unt[i] <- sample(rownames(low_prop_untreat),1)
+  }
+}
+```
+
+
+```{r}
+control <- df[ind_unt,]
+colnames(control) <- paste0(colnames(control),"_control")
+
+samples <- cbind(df[ind_t,],control)
+
+rownames(samples) <- c(1:nrow(samples))
+
+rbind(head(samples,5),tail(samples,5))
+```
+
+```{r}
+ATE <- mean(samples$dead-samples$dead_control)
+ATE
+```
+
+After calculating the value of ATE for this new paired dataset, we can see that the value is much less biased than with the first version of the pair matching.
+
+Can we do better though?
+
+
+## Subclassification
+
+Here the approach is related to the second version of pair matching, as it relies on the distribution of the propensity score. The hist of it is that we can subdivide our population by the categories of a factorized by ranges propensity score. With our population classified in each category (in this case only two, as the covariate is binary), we only need to compute the ATE for each subclass, and then apply the next formula:
+
+$$ATE = Percentage_1 * ATE_1 + ... + Percentage_n*ATE_n$$
+
+```{r}
+(ATE_high_propensity <- mean(high_prop_treat$dead)-mean(high_prop_untreat$dead))
+
+(ATE_low_propensity <- mean(low_prop_treat$dead)-mean(low_prop_untreat$dead))
+
+(ATE <- percentages[1]*ATE_low_propensity + percentages[2]*ATE_high_propensity)
+```
+
+After doing so our results is very very close to the known true value of ATE.
+
+
+## Conclusions
+
+In this text we reviewed a few ways of computing the Average Treatment Effect relatively simply. First with the classical Adjustment Formula, perfectly usable with settings were the covariates are low dimensional like our example. And then using the propensity score, most fit for high dimensional sets of covariates.
+
+In this example, the Adjustment Formula gave us an exact result of the ATE, as we had fabricated the dataset and knew the specific probabilities needed. We were able then to compare to the propensity score approaches, and even though in this example the best method has been subclassification this doesn’t mean that in any other type of problem it will be so. We would recommend to test different methods, the ones presented and also other methodologies not reviewed here before setting into one approach.
